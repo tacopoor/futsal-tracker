@@ -4,7 +4,7 @@ const SETTINGS_KEY = "futsal_settings_v2";
 
 /* ====== Default master data ====== */
 const DEFAULT_PLACES = [
-  "マリノストリコロールパーク",
+  "マリノストリコールパーク",
   "フットサルクラブ横浜",
   "アイリフットサル",
   "体育館",
@@ -1049,6 +1049,15 @@ resetForm();
 closeDoneModal();
 closeWipeModal();
 
+/* ====== tab deep-link (from analysis etc.) ====== */
+function applyHashTab() {
+  const hash = (location.hash || "").toLowerCase();
+  if (hash.includes("tab=mypage")) showTab("mypage");
+  else if (hash.includes("tab=settings")) showTab("settings");
+  else if (hash.includes("tab=record")) showTab("record");
+}
+window.addEventListener("hashchange", applyHashTab);
+
 /* boot */
 (function boot() {
   const s = loadSettings();
@@ -1060,6 +1069,9 @@ closeWipeModal();
   renderSettings();
 
   if (filterYM) buildYMOptions(loadRecords());
+
+  // ★ analysis から戻ったときなどにタブ反映
+  applyHashTab();
 })();
 
 /* ====== Data analysis button ====== */
@@ -1074,15 +1086,16 @@ function openAnalysisPage() {
   if (place) params.set("place", place);
 
   // ※将来、他の条件も渡したくなったらここに追加できます
+  // ★戻り先を判別できるよう returnTo を付ける（analysis.js 側で使う）
+  params.set("returnTo", "mypage");
+
   const url = `analysis.html${params.toString() ? "?" + params.toString() : ""}`;
 
-  // 別タブで開く（noopener で安全に）
-  window.open(url, "_blank", "noopener");
+  // ★PWAで安定：同一画面で遷移（別タブ/別ウィンドウにしない）
+  location.href = url;
 }
 
 analysisBtn?.addEventListener("click", () => {
-  // マイページ側の最新状態を反映してから開きたい場合は、
-  // 必要に応じて renderMypage() を呼んでもOK（通常不要）
   openAnalysisPage();
 });
 

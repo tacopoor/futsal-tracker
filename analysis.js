@@ -590,9 +590,15 @@ function render() {
 function init() {
   reloadBtn?.addEventListener("click", () => location.reload());
   backBtn?.addEventListener("click", () => {
-    // 戻る：元タブがある前提で history back を優先。だめなら閉じる。
-    if (history.length > 1) history.back();
-    else window.close();
+    // returnTo=mypage が来ていればマイページへ、それ以外は index へ
+    const sp = new URLSearchParams(location.search);
+    const returnTo = (sp.get("returnTo") || "").trim();
+
+    if (returnTo === "mypage") location.href = "./index.html#tab=mypage";
+    else if (returnTo === "settings")
+      location.href = "./index.html#tab=settings";
+    else if (returnTo === "record") location.href = "./index.html#tab=record";
+    else location.href = "./index.html";
   });
 
   // リサイズで描画が崩れやすいので再描画
