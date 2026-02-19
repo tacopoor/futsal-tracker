@@ -19,6 +19,19 @@ const DEFAULT_PLACES = [
   "その他",
 ];
 
+/* ====== Play video tags ====== */
+const VIDEO_TAGS = [
+  "ゴール",
+  "アシスト",
+  "股抜き",
+  "ベストゴール",
+  "ベストアシスト",
+  "ナイス連携",
+  "Good Play",
+  "Bad Play",
+  "その他",
+];
+
 function loadRecords() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -84,9 +97,20 @@ function formatDate(iso) {
   const [y, m, d] = iso.split("-");
   return `${y}/${m}/${d}`;
 }
-function sumGoals(r) {
-  return (r.goals?.right ?? 0) + (r.goals?.left ?? 0) + (r.goals?.head ?? 0);
+function getGoalTotal(r) {
+  const g = r?.goals || {};
+  // 新形式（goals.total）があれば優先
+  if (typeof g.total === "number" && Number.isFinite(g.total) && g.total >= 0) {
+    return g.total;
+  }
+  // 旧形式（right/left/head の合算）
+  return (g.right ?? 0) + (g.left ?? 0) + (g.head ?? 0);
 }
+
+function sumGoals(r) {
+  return getGoalTotal(r);
+}
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -206,6 +230,7 @@ const elDate = document.getElementById("date");
 const elPlace = document.getElementById("place");
 const elMatches = document.getElementById("matches");
 
+const elGT = document.getElementById("gTotal");
 const elGR = document.getElementById("gRight");
 const elGL = document.getElementById("gLeft");
 const elGH = document.getElementById("gHead");
@@ -223,8 +248,40 @@ const elNmPass = document.getElementById("nmPass");
 const elNmDribble = document.getElementById("nmDribble");
 const elNmOnly = document.getElementById("nmOnly");
 
+/* ====== Play video inputs ====== */
+const videoInputs = document.getElementById("videoInputs");
+const addVideoBtn = document.getElementById("addVideoBtn");
+
 const saveBtn = document.getElementById("saveBtn");
 const resetBtn = document.getElementById("resetBtn");
+
+/* ====== Edit state ====== */
+let editingId = null; // null なら新規、id が入っていれば修正中
+
+/* ====== Record Delete Button (edit only) ====== */
+// HTMLにボタンが無い場合でも動くように生成する
+let recordDeleteBtn = document.getElementById("recordDeleteBtn");
+if (!recordDeleteBtn && resetBtn) {
+  recordDeleteBtn = document.createElement("button");
+  recordDeleteBtn.id = "recordDeleteBtn";
+  recordDeleteBtn.type = "button";
+  recordDeleteBtn.className = "btn danger"; // 既存のbtnクラスに合わせる
+  recordDeleteBtn.textContent = "削除";
+  recordDeleteBtn.classList.add("hidden");
+
+  // 「入力をリセット」ボタンの下（同じ親の末尾）に置く
+  resetBtn.parentElement?.appendChild(recordDeleteBtn);
+}
+
+// 編集モード時だけ削除ボタンを出す
+function setEditMode(on) {
+  if (on) {
+    recordDeleteBtn?.classList.remove("hidden");
+  } else {
+    recordDeleteBtn?.classList.add("hidden");
+    editingId = null;
+  }
+}
 
 /* ====== Elements: MyPage ====== */
 const kpiGoals = document.getElementById("kpiGoals");
@@ -268,18 +325,34 @@ const placesContainer = document.getElementById("placesContainer");
 /* ====== Modals ====== */
 const doneModal = document.getElementById("doneModal");
 const closeModalBtn = document.getElementById("closeModalBtn");
+const doneModalTitle = document.getElementById("doneModalTitle");
+const doneModalText = document.getElementById("doneModalText");
 
 const wipeModal = document.getElementById("wipeModal");
 const wipeCancelBtn = document.getElementById("wipeCancelBtn");
 const wipeConfirmBtn = document.getElementById("wipeConfirmBtn");
 
 /* ====== Modal helpers ====== */
-function openDoneModal() {
+let doneModalAfterClose = null;
+
+function openDoneModal(
+  title = "記録完了",
+  text = "保存しました。",
+  afterClose = null,
+) {
+  if (doneModalTitle) doneModalTitle.textContent = title;
+  if (doneModalText) doneModalText.textContent = text;
+  doneModalAfterClose = typeof afterClose === "function" ? afterClose : null;
   doneModal.classList.remove("hidden");
 }
+
 function closeDoneModal() {
   doneModal.classList.add("hidden");
+  const fn = doneModalAfterClose;
+  doneModalAfterClose = null;
+  if (fn) fn();
 }
+
 function openWipeModal() {
   wipeModal.classList.remove("hidden");
 }
@@ -295,6 +368,115 @@ wipeCancelBtn?.addEventListener("click", closeWipeModal);
 wipeModal?.addEventListener("click", (e) => {
   if (e.target === wipeModal) closeWipeModal();
 });
+
+/* ====== Play映像登録 helpers ====== */
+const VIDEO_MIN_ROWS = 3;
+const VIDEO_MAX_ROWS = 10;
+
+function videoTagOptionsHtml(selected = "") {
+  return VIDEO_TAGS.map((t) => {
+    const sel = t === selected ? " selected" : "";
+    return `<option value="${escapeHtml(t)}"${sel}>${escapeHtml(t)}</option>`;
+  }).join("");
+}
+
+function createVideoRow({ url = "", tag = "その他" } = {}, rowIndex = 0) {
+  const row = document.createElement("div");
+  row.className = "videoRow";
+
+  const urlInput = document.createElement("input");
+  urlInput.type = "url";
+  urlInput.placeholder = "https://...（YouTube等）";
+  urlInput.className = "videoUrl";
+  urlInput.value = url;
+
+  const tagSelect = document.createElement("select");
+  tagSelect.className = "videoTag";
+  tagSelect.innerHTML = videoTagOptionsHtml(tag);
+
+  row.appendChild(urlInput);
+  row.appendChild(tagSelect);
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "btn danger videoDelBtn";
+  delBtn.textContent = "×";
+
+  delBtn.addEventListener("click", () => {
+    const rows = [...videoInputs.querySelectorAll(".videoRow")];
+    const index = rows.indexOf(row);
+
+    // ★先頭3行は削除不可
+    if (index < VIDEO_MIN_ROWS) return;
+
+    row.remove();
+    updateAddVideoBtnState();
+  });
+
+  // ★4行目以降だけ × を表示（0始まりなので 3 以上）
+  if (rowIndex >= VIDEO_MIN_ROWS) {
+    row.appendChild(delBtn);
+  }
+
+  return row;
+}
+
+function updateAddVideoBtnState() {
+  const count = videoInputs?.querySelectorAll(".videoRow").length || 0;
+  if (addVideoBtn) {
+    addVideoBtn.disabled = count >= VIDEO_MAX_ROWS;
+  }
+}
+
+function ensureVideoRows(minCount = VIDEO_MIN_ROWS) {
+  if (!videoInputs) return;
+  const cur = videoInputs.querySelectorAll(".videoRow").length;
+  for (let i = cur; i < minCount; i++) {
+    // 初期は「その他」にしておく
+    videoInputs.appendChild(createVideoRow({ url: "", tag: "その他" }, i));
+  }
+  updateAddVideoBtnState();
+}
+
+function clearAndInitVideoRows(defaultCount = VIDEO_MIN_ROWS) {
+  if (!videoInputs) return;
+  videoInputs.innerHTML = "";
+  ensureVideoRows(defaultCount);
+}
+
+function collectVideosFromUI() {
+  if (!videoInputs) return [];
+  const rows = [...videoInputs.querySelectorAll(".videoRow")];
+
+  const videos = rows
+    .map((row) => {
+      const url = (row.querySelector("input.videoUrl")?.value || "").trim();
+      const tag =
+        (row.querySelector("select.videoTag")?.value || "その他").trim() ||
+        "その他";
+      return { url, tag };
+    })
+    // URLが空の行は保存しない（空行が残っててもOK）
+    .filter((v) => v.url);
+
+  return videos;
+}
+
+function loadVideosToUI(videos = []) {
+  if (!videoInputs) return;
+
+  videoInputs.innerHTML = "";
+
+  const src = Array.isArray(videos) ? videos : [];
+  src.slice(0, VIDEO_MAX_ROWS).forEach((v, idx) => {
+    videoInputs.appendChild(
+      createVideoRow({ url: v.url || "", tag: v.tag || "その他" }, idx),
+    );
+  });
+
+  // 既存が少ない場合は最低3行まで埋める
+  ensureVideoRows(VIDEO_MIN_ROWS);
+}
 
 /* ====== Build select options ====== */
 function buildCountSelect(el, { min = 0, max = 20, defaultValue = 0 } = {}) {
@@ -348,6 +530,8 @@ function resetForm() {
 
   if (elMatches) elMatches.value = "1";
 
+  if (elGT) elGT.value = "0";
+
   elGR.value = "0";
   elGL.value = "0";
   elGH.value = "0";
@@ -360,8 +544,36 @@ function resetForm() {
   elNmPass.value = "0";
   elNmDribble.value = "0";
   elNmOnly.value = "0";
+
+  // ★Play映像入力も初期化（3行）
+  clearAndInitVideoRows(3);
+
+  // リセットしたら修正モード解除
+  setEditMode(false);
 }
 resetBtn.addEventListener("click", resetForm);
+
+/* ====== Play映像：追加ボタン ====== */
+addVideoBtn?.addEventListener("click", () => {
+  if (!videoInputs) return;
+
+  const count = videoInputs.querySelectorAll(".videoRow").length;
+  if (count >= VIDEO_MAX_ROWS) return;
+
+  addVideoBtn?.addEventListener("click", () => {
+    if (!videoInputs) return;
+
+    const count = videoInputs.querySelectorAll(".videoRow").length;
+    if (count >= VIDEO_MAX_ROWS) return;
+
+    // ★追加する行は必ず4行目以降扱いになるので count をrowIndexとして渡す
+    videoInputs.appendChild(createVideoRow({ url: "", tag: "その他" }, count));
+
+    updateAddVideoBtnState();
+  });
+
+  updateAddVideoBtnState();
+});
 
 /* ====== Nutmegs validation ====== */
 function validateNutmegs(total, details) {
@@ -379,6 +591,72 @@ function validateNutmegs(total, details) {
   return { ok: true, sum: detailSum };
 }
 
+function loadRecordToForm(record) {
+  if (!record) return;
+
+  editingId = record.id;
+  setEditMode(true);
+
+  // タブ移動（まず記録画面を出す）
+  showTab("record");
+  location.hash = "#tab=record"; // 任意（戻ったときにタブ維持したい場合）
+
+  // 値を流し込み
+  elDate.value = record.date || "";
+  elPlace.value = record.place || "";
+
+  if (elMatches) elMatches.value = String(record.matches ?? 1);
+
+  // goals
+  const g = record.goals || {};
+  if (elGT) elGT.value = String(g.total ?? 0);
+  elGR.value = String(g.right ?? 0);
+  elGL.value = String(g.left ?? 0);
+  elGH.value = String(g.head ?? 0);
+
+  // assists
+  const a = record.assists || {};
+  elAT.value = String(a.total ?? 0);
+  elAToTarget.value = String(a.toTarget ?? 0);
+
+  // 対象選手
+  const tName = (a.targetName || UNSET).trim() || UNSET;
+  if ([...assistTargetSelect.options].some((o) => o.value === tName)) {
+    assistTargetSelect.value = tName;
+  } else {
+    assistTargetSelect.value = UNSET;
+  }
+
+  // nutmegs
+  const nm = record.nutmegs || {};
+  if (typeof nm === "number") {
+    elNutTotal.value = String(nm);
+    elNmGoal.value = "0";
+    elNmAssistPass.value = "0";
+    elNmPass.value = "0";
+    elNmDribble.value = "0";
+    elNmOnly.value = "0";
+  } else {
+    elNutTotal.value = String(nm.total ?? 0);
+    const d = nm.details || {};
+    elNmGoal.value = String(d.goal ?? 0);
+    elNmAssistPass.value = String(d.assistPass ?? 0);
+    elNmPass.value = String(d.pass ?? 0);
+    elNmDribble.value = String(d.dribble ?? 0);
+    elNmOnly.value = String(d.only ?? 0);
+  }
+
+  // ★Play映像（編集時に復元）
+  loadVideosToUI(record.playVideos || []);
+
+  elMemo.value = record.memo || "";
+
+  msgInfo(
+    recordMsgEl,
+    `修正モード：${formatDate(record.date)} / ${record.place}`,
+  );
+}
+
 /* ====== Save record ====== */
 saveBtn.addEventListener("click", () => {
   const settings = loadSettings();
@@ -391,6 +669,24 @@ saveBtn.addEventListener("click", () => {
   if (!date) return msgError(recordMsgEl, "日付を入力してください。");
   if (!place)
     return msgError(recordMsgEl, "場所（フットサル場）を選択してください。");
+
+  // ===== ゴール整合性チェック（修正版） =====
+  const goalsTotal = n(elGT?.value);
+  const goalsRight = n(elGR.value);
+  const goalsLeft = n(elGL.value);
+  const goalsHead = n(elGH.value);
+
+  const goalsBreakSum = goalsRight + goalsLeft + goalsHead;
+
+  // ★ 内訳が1つでも入力されている場合のみチェック
+  const hasGoalBreakdown = goalsRight > 0 || goalsLeft > 0 || goalsHead > 0;
+
+  if (hasGoalBreakdown && goalsTotal !== goalsBreakSum) {
+    return msgError(
+      recordMsgEl,
+      `ゴール総数（${goalsTotal}）と内訳合計（右${goalsRight}+左${goalsLeft}+頭${goalsHead}=${goalsBreakSum}）が一致しません。修正してください。`,
+    );
+  }
 
   const selectedTarget = (assistTargetSelect.value || "").trim() || UNSET;
 
@@ -422,9 +718,10 @@ saveBtn.addEventListener("click", () => {
     place,
     matches,
     goals: {
-      right: n(elGR.value),
-      left: n(elGL.value),
-      head: n(elGH.value),
+      total: goalsTotal,
+      right: goalsRight,
+      left: goalsLeft,
+      head: goalsHead,
     },
     assists: {
       total: assistsTotal,
@@ -436,20 +733,48 @@ saveBtn.addEventListener("click", () => {
       details: nutDetails,
     },
     memo: elMemo.value.trim(),
+    playVideos: collectVideosFromUI(),
   };
 
   const records = loadRecords();
-  records.push(record);
-  saveRecords(records);
+
+  if (editingId) {
+    // 更新：同じIDを探して置換
+    const idx = records.findIndex((r) => r.id === editingId);
+    if (idx >= 0) {
+      // createdAt は保持したい場合は維持（必要なら）
+      record.id = editingId;
+      record.createdAt = records[idx].createdAt || record.createdAt;
+      record.updatedAt = new Date().toISOString();
+      records[idx] = record;
+    } else {
+      // 見つからない場合は新規扱いにフォールバック
+      records.push(record);
+    }
+    saveRecords(records);
+
+    msgInfo(
+      recordMsgEl,
+      `更新しました：${formatDate(record.date)} / ${record.place}` +
+        `（試合数 ${record.matches}、ゴール ${sumGoals(record)}、アシスト ${record.assists.total} / ${record.assists.targetName} ${record.assists.toTarget}、股抜き ${record.nutmegs.total}）`,
+    );
+
+    // 更新後は編集モード解除
+    setEditMode(false);
+  } else {
+    // 新規
+    records.push(record);
+    saveRecords(records);
+
+    msgInfo(
+      recordMsgEl,
+      `保存しました：${formatDate(record.date)} / ${record.place}` +
+        `（試合数 ${record.matches}、ゴール ${sumGoals(record)}、アシスト ${record.assists.total} / ${record.assists.targetName} ${record.assists.toTarget}、股抜き ${record.nutmegs.total}）`,
+    );
+  }
 
   settings.selectedAssistTarget = selectedTarget;
   saveSettings(settings);
-
-  msgInfo(
-    recordMsgEl,
-    `保存しました：${formatDate(record.date)} / ${record.place}` +
-      `（試合数 ${record.matches}、ゴール ${sumGoals(record)}、アシスト ${record.assists.total} / ${selectedTarget} ${record.assists.toTarget}、股抜き ${record.nutmegs.total}）`,
-  );
 
   // 年月候補が増える可能性がある
   if (filterYM) {
@@ -461,6 +786,42 @@ saveBtn.addEventListener("click", () => {
   openDoneModal();
 });
 
+recordDeleteBtn?.addEventListener("click", () => {
+  msgClear(recordMsgEl);
+
+  if (!editingId) return;
+
+  const records = loadRecords();
+  const target = records.find((r) => r.id === editingId);
+  if (!target) {
+    msgError(recordMsgEl, "削除対象データが見つかりません。");
+    setEditMode(false);
+    return;
+  }
+
+  const next = records.filter((r) => r.id !== editingId);
+  saveRecords(next);
+
+  // 画面下メッセージ（任意：残してOK）
+  msgInfo(
+    recordMsgEl,
+    `該当データを削除しました：${formatDate(target.date)} / ${target.place}`,
+  );
+
+  // 年月候補の更新（必要なら）
+  if (filterYM) buildYMOptions(next, filterYM.value);
+
+  // フォームを初期化＆編集解除
+  resetForm();
+  setEditMode(false);
+
+  // ★ここが今回の要件：削除モーダルを出して、OK押下でマイページへ
+  openDoneModal("削除完了", "削除しました。", () => {
+    showTab("mypage");
+    location.hash = "#tab=mypage"; // 任意（URLにも反映したいなら）
+  });
+});
+
 /* ====== filterYM options ====== */
 function getYMLabel(ym) {
   const [y, m] = ym.split("-");
@@ -469,23 +830,39 @@ function getYMLabel(ym) {
 function buildYMOptions(records, preferValue = "") {
   if (!filterYM) return;
 
+  // すべての YYYY-MM を抽出
   const yms = uniq(
     records
       .map((r) => String(r?.date || "").slice(0, 7))
       .filter((v) => /^\d{4}-\d{2}$/.test(v)),
-  ).sort((a, b) => b.localeCompare(a));
+  ).sort((a, b) => b.localeCompare(a)); // 新しい月が上
 
-  const currentYM = nowYM();
-  const final = yms.includes(currentYM) ? yms : [currentYM, ...yms];
+  // 年を抽出（YYYY）
+  const years = uniq(yms.map((ym) => ym.slice(0, 4))).sort((a, b) =>
+    b.localeCompare(a),
+  );
+
+  // 表示用ラベル
+  const yearLabel = (y) => `${y}年`;
+  const ymLabel = (ym) => {
+    const [y, m] = ym.split("-");
+    return `${y}年${Number(m)}月`;
+  };
 
   let html = `<option value="all">すべて</option>`;
-  html += final
-    .map((ym) => `<option value="${ym}">${getYMLabel(ym)}</option>`)
+
+  // 年 → 月 の順で追加
+  html += years
+    .map((y) => `<option value="${y}">${yearLabel(y)}</option>`)
+    .join("");
+  html += yms
+    .map((ym) => `<option value="${ym}">${ymLabel(ym)}</option>`)
     .join("");
 
   filterYM.innerHTML = html;
 
-  let next = currentYM;
+  // 選択状態の復元
+  let next = "all";
   if (preferValue) {
     const exists = [...filterYM.options].some((o) => o.value === preferValue);
     if (exists) next = preferValue;
@@ -495,35 +872,46 @@ function buildYMOptions(records, preferValue = "") {
 
 /* ====== Filters ====== */
 function applyFilters(records) {
-  const ym = (filterYM?.value || "").trim(); // "YYYY-MM" or "all"
+  const ym = (filterYM?.value || "").trim(); // "YYYY-MM" or "YYYY" or "all"
   const p = filterPlace.value || "";
 
   return records.filter((r) => {
     if (!r?.date) return false;
 
+    const rYM = String(r.date).slice(0, 7); // YYYY-MM
+    const rY = String(r.date).slice(0, 4); // YYYY
+
+    // 年月フィルタ
     if (ym && ym !== "all") {
-      const rYM = String(r.date).slice(0, 7);
-      if (rYM !== ym) return false;
+      if (/^\d{4}-\d{2}$/.test(ym)) {
+        // 月指定
+        if (rYM !== ym) return false;
+      } else if (/^\d{4}$/.test(ym)) {
+        // 年指定
+        if (rY !== ym) return false;
+      }
     }
 
+    // 場所フィルタ
     if (p && r.place !== p) return false;
+
     return true;
   });
 }
+
 filterYM?.addEventListener("change", renderMypage);
 filterPlace.addEventListener("change", renderMypage);
 
 /* ====== KPI ====== */
 function renderKPIs(records) {
-  const playDays = uniq(
-    records.map((r) => r?.date).filter((v) => typeof v === "string" && v),
-  ).length;
+  const playDays = records.filter((r) => r && r.date && r.place).length;
 
   let matchSum = 0;
 
   let gr = 0,
     gl = 0,
     gh = 0,
+    goalSum = 0,
     at = 0,
     ai = 0,
     nm = 0;
@@ -540,6 +928,9 @@ function renderKPIs(records) {
     gr += r.goals?.right ?? 0;
     gl += r.goals?.left ?? 0;
     gh += r.goals?.head ?? 0;
+
+    // ★合計は「総数があれば総数、なければ内訳合計」
+    goalSum += sumGoals(r);
 
     at += r.assists?.total ?? 0;
     ai += r.assists?.toTarget ?? r.assists?.toPivo ?? 0;
@@ -562,7 +953,7 @@ function renderKPIs(records) {
   kpiGR.textContent = gr;
   kpiGL.textContent = gl;
   kpiGH.textContent = gh;
-  kpiGoals.textContent = gr + gl + gh;
+  kpiGoals.textContent = goalSum;
 
   kpiAssists.textContent = at;
   kpiAI.textContent = ai;
@@ -586,6 +977,37 @@ function groupByYM(records) {
   }
   const yms = [...map.keys()].sort((a, b) => b.localeCompare(a));
   return { map, yms };
+}
+
+/* ===== Play映像：マイページ表示用 ===== */
+function renderPlayVideosHtml(r) {
+  const arr = Array.isArray(r?.playVideos) ? r.playVideos : [];
+  const cleaned = arr
+    .map((v) => ({
+      tag: (v?.tag || "その他").trim() || "その他",
+      url: (v?.url || "").trim(),
+    }))
+    .filter((v) => /^https?:\/\//i.test(v.url)); // URLがあるものだけ表示
+
+  if (cleaned.length === 0) return "";
+
+  // URL文字列は escapeして表示（hrefはそのまま入れるが安全寄りにしたければ後述のバリデーション追加）
+  return `
+    <div class="videoLinks">
+      ${cleaned
+        .map(
+          (v) => `
+          <div class="videoLine">
+            <span class="tagBadge">${escapeHtml(v.tag)}</span>
+            <a class="videoUrlLink" href="${escapeHtml(v.url)}" target="_blank" rel="noopener noreferrer">
+              ${escapeHtml(v.url)}
+            </a>
+          </div>
+        `,
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderRecordsItems(recordsInGroup) {
@@ -615,10 +1037,11 @@ function renderRecordsItems(recordsInGroup) {
                 アシスト：${r.assists.total}（${escapeHtml(tName)} ${tCount}） /
                 股抜き：${nm}
               </div>
+              ${renderPlayVideosHtml(r)}
             </div>
 
             <div class="itemActions">
-              <button class="btn danger small" data-action="delete" data-id="${r.id}">削除</button>
+              <button class="btn small editBtn" data-action="edit" data-id="${r.id}">修正</button>
             </div>
           </div>
 
@@ -712,6 +1135,14 @@ function renderList(records, { openYM, showMonthSummary = false } = {}) {
     .join("");
 }
 
+function latestYMInYear(records, year) {
+  const yms = records
+    .map((r) => String(r?.date || "").slice(0, 7))
+    .filter((ym) => /^\d{4}-\d{2}$/.test(ym) && ym.startsWith(year + "-"))
+    .sort((a, b) => b.localeCompare(a)); // 新しい月が先頭
+  return yms[0] || "";
+}
+
 function renderMypage() {
   msgClear(mypageMsgEl);
 
@@ -728,14 +1159,22 @@ function renderMypage() {
   const filtered = applyFilters(all);
   renderKPIs(filtered);
 
-  const selectedYM = (filterYM?.value || "").trim();
+  const selectedYM = (filterYM?.value || "").trim(); // all / YYYY / YYYY-MM
 
   if (selectedYM === "all") {
     renderList(filtered, {
-      openYM: nowYM(), // 「すべて」は現在月だけ開く
-      showMonthSummary: true, // ★月ヘッダ合計を表示
+      openYM: nowYM(), // 「すべて」は現在月を開く
+      showMonthSummary: true,
+    });
+  } else if (/^\d{4}$/.test(selectedYM)) {
+    // ★「年」選択：その年の最新月を自動で開く
+    const openYM = latestYMInYear(filtered, selectedYM) || nowYM();
+    renderList(filtered, {
+      openYM,
+      showMonthSummary: false,
     });
   } else {
+    // 月選択（YYYY-MM）
     renderList(filtered, {
       openYM: selectedYM || nowYM(),
       showMonthSummary: false,
@@ -781,22 +1220,21 @@ list.addEventListener("click", (e) => {
     return;
   }
 
-  // 削除
-  const delBtn = e.target.closest("button[data-action='delete']");
-  if (!delBtn) return;
+  // 修正
+  const editBtn = e.target.closest("button[data-action='edit']");
+  if (!editBtn) return;
 
-  const id = delBtn.dataset.id;
-  const beforeYM = filterYM?.value || "";
+  const id = editBtn.dataset.id;
+  const records = loadRecords();
+  const record = records.find((r) => r.id === id);
 
-  const records = loadRecords().filter((r) => r.id !== id);
-  saveRecords(records);
+  if (!record) return;
 
-  msgInfo(mypageMsgEl, "1件削除しました。");
+  // 修正モードで記録ページへ
+  loadRecordToForm(record);
 
-  if (filterYM) {
-    buildYMOptions(records, beforeYM);
-  }
-  renderMypage();
+  // ここで return するのが重要
+  return;
 });
 
 /* ====== Wipe all records ====== */
@@ -1029,6 +1467,7 @@ placesContainer.addEventListener("click", (e) => {
 });
 
 /* ====== Init ====== */
+buildCountSelect(elGT);
 buildCountSelect(elGR);
 buildCountSelect(elGL);
 buildCountSelect(elGH);
@@ -1050,12 +1489,49 @@ closeDoneModal();
 closeWipeModal();
 
 /* ====== tab deep-link (from analysis etc.) ====== */
+
+// ★ここに追加
+function applyHashFiltersToMypage() {
+  const hash = (location.hash || "").replace(/^#/, "");
+  const sp = new URLSearchParams(hash);
+
+  const tab = (sp.get("tab") || "").toLowerCase();
+  if (tab !== "mypage") return;
+
+  const ym = (sp.get("ym") || "").trim();
+  const place = (sp.get("place") || "").trim();
+
+  if (filterYM && ym) {
+    const exists = [...filterYM.options].some((o) => o.value === ym);
+    if (exists) filterYM.value = ym;
+  }
+
+  if (filterPlace) {
+    if (place === "") {
+      filterPlace.value = "";
+    } else {
+      const exists = [...filterPlace.options].some((o) => o.value === place);
+      if (exists) filterPlace.value = place;
+    }
+  }
+}
+
+// ★applyHashTab を拡張
 function applyHashTab() {
   const hash = (location.hash || "").toLowerCase();
   if (hash.includes("tab=mypage")) showTab("mypage");
   else if (hash.includes("tab=settings")) showTab("settings");
   else if (hash.includes("tab=record")) showTab("record");
+
+  // ★フィルタ復元
+  applyHashFiltersToMypage();
+
+  // ★復元後に再描画
+  if (hash.includes("tab=mypage")) {
+    renderMypage();
+  }
 }
+
 window.addEventListener("hashchange", applyHashTab);
 
 /* boot */
@@ -1076,23 +1552,24 @@ window.addEventListener("hashchange", applyHashTab);
 
 /* ====== Data analysis button ====== */
 function openAnalysisPage() {
-  // マイページの現在フィルタを取得（存在しない場合にも壊れないように）
-  const ym = (filterYM?.value || "").trim(); // "2026-02" or ""(すべて)
+  const ym = (filterYM?.value || "").trim(); // "all" / "YYYY" / "YYYY-MM"
   const place = (filterPlace?.value || "").trim(); // "" = すべて
 
   const params = new URLSearchParams();
-  // ym は「すべて」の場合は空になっている想定（必要なら "all" にしてもOK）
   if (ym) params.set("ym", ym);
   if (place) params.set("place", place);
 
-  // ※将来、他の条件も渡したくなったらここに追加できます
-  // ★戻り先を判別できるよう returnTo を付ける（analysis.js 側で使う）
-  params.set("returnTo", "mypage");
+  // ★戻り先URLを明示（ym/place 付きで返す）
+  const backParams = new URLSearchParams();
+  backParams.set("tab", "mypage");
+  if (ym) backParams.set("ym", ym);
+  if (place) backParams.set("place", place);
 
-  const url = `analysis.html${params.toString() ? "?" + params.toString() : ""}`;
+  // index.html に戻ったときにハッシュだけでなく ym/place も渡す
+  // 例: ./index.html#tab=mypage&ym=2026&place=体育館
+  params.set("back", `./index.html#${backParams.toString()}`);
 
-  // ★PWAで安定：同一画面で遷移（別タブ/別ウィンドウにしない）
-  location.href = url;
+  location.href = `analysis.html${params.toString() ? "?" + params.toString() : ""}`;
 }
 
 analysisBtn?.addEventListener("click", () => {

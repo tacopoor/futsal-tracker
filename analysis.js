@@ -19,10 +19,60 @@ function formatDate(iso) {
   const [y, m, d] = String(iso).split("-");
   return `${y}/${m}/${d}`;
 }
-function sumGoals(r) {
+
+function labelMMDD(iso) {
+  if (!iso) return "";
+  const m = String(iso).slice(5, 7);
+  const d = String(iso).slice(8, 10);
+  return `${Number(m)}/${Number(d)}`; // "02/18" ではなく "2/18"
+}
+
+// mode:
+//  - "mmdd": 2/18
+//  - "mmdd_seq": 2/18(2) のように同日連番
+function buildTrendLabels(rows) {
+  const countMap = new Map();
+
+  // まず日付ごとの総件数を数える
+  for (const r of rows) {
+    countMap.set(r.date, (countMap.get(r.date) || 0) + 1);
+  }
+
+  const seqMap = new Map();
+
+  return rows.map((r) => {
+    const base = labelMMDD(r.date);
+    const totalForDate = countMap.get(r.date) || 1;
+
+    const currentSeq = (seqMap.get(r.date) || 0) + 1;
+    seqMap.set(r.date, currentSeq);
+
+    // その日が1件だけなら日付のみ
+    if (totalForDate === 1) {
+      return base;
+    }
+
+    // 複数ある場合は (2) 以降を表示
+    if (currentSeq === 1) {
+      return base; // 1件目はそのまま
+    }
+
+    return `${base}(${currentSeq})`;
+  });
+}
+
+function getGoalTotal(r) {
   const g = r?.goals || {};
+  if (typeof g.total === "number" && Number.isFinite(g.total) && g.total >= 0) {
+    return g.total;
+  }
   return (g.right ?? 0) + (g.left ?? 0) + (g.head ?? 0);
 }
+
+function sumGoals(r) {
+  return getGoalTotal(r);
+}
+
 function getNutTotal(r) {
   const nm = r?.nutmegs;
   if (typeof nm === "number") return nm;
@@ -87,6 +137,14 @@ const nmBreakCanvas = document.getElementById("nmBreakChart");
 const placeTableBody = document.getElementById("placeTableBody");
 const recordsTbody = document.getElementById("recordsTbody");
 
+// ===== Average table =====
+const avgTableBody = document.getElementById("avgTableBody");
+
+// ===== URL list DOM =====
+const urlTagFilter = document.getElementById("urlTagFilter");
+const urlTableBody = document.getElementById("urlTableBody");
+const urlCountText = document.getElementById("urlCountText");
+
 const reloadBtn = document.getElementById("reloadBtn");
 const backBtn = document.getElementById("backBtn");
 
@@ -117,7 +175,21 @@ function readParams() {
 function filterRecords(all, { ym, place }) {
   return all.filter((r) => {
     if (!r || !r.date || !r.place) return false;
-    if (ym && ymOfDate(r.date) !== ym) return false;
+
+    // ym:
+    // ""        => all
+    // "YYYY"    => year
+    // "YYYY-MM" => month
+    if (ym) {
+      if (/^\d{4}$/.test(ym)) {
+        // 年フィルタ
+        if (!String(r.date).startsWith(ym + "-")) return false;
+      } else {
+        // 月フィルタ（従来）
+        if (ymOfDate(r.date) !== ym) return false;
+      }
+    }
+
     if (place && r.place !== place) return false;
     return true;
   });
@@ -125,12 +197,12 @@ function filterRecords(all, { ym, place }) {
 
 /* ====== Aggregations ====== */
 function calcKPIs(records) {
-  const uniqueDates = new Set(records.map((r) => r.date));
   let matches = 0;
 
   let gr = 0,
     gl = 0,
     gh = 0,
+    goalsTotal = 0,
     assists = 0,
     assistsToTarget = 0,
     nmTotal = 0;
@@ -144,6 +216,7 @@ function calcKPIs(records) {
   for (const r of records) {
     matches += getMatches(r);
 
+    goalsTotal += getGoalTotal(r);
     gr += r.goals?.right ?? 0;
     gl += r.goals?.left ?? 0;
     gh += r.goals?.head ?? 0;
@@ -162,9 +235,9 @@ function calcKPIs(records) {
   }
 
   return {
-    playDays: uniqueDates.size,
+    playDays: records.length,
     matches,
-    goals: { total: gr + gl + gh, right: gr, left: gl, head: gh },
+    goals: { total: goalsTotal, right: gr, left: gl, head: gh },
     assists: { total: assists, toTarget: assistsToTarget },
     nutmegs: {
       total: nmTotal,
@@ -193,6 +266,33 @@ function groupByDate(records) {
     cur.nutmegs += getNutTotal(r);
   }
   return [...map.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/* ====== Cumulative trend (per record) ====== */
+function buildCumulativeRowsPerRecord(records) {
+  // 古い→新しい（同日なら createdAt で安定化）
+  const sorted = [...records].sort((a, b) =>
+    ((a.date || "") + (a.createdAt || "")).localeCompare(
+      (b.date || "") + (b.createdAt || ""),
+    ),
+  );
+
+  let g = 0;
+  let a = 0;
+  let nm = 0;
+
+  return sorted.map((r) => {
+    g += sumGoals(r);
+    a += r.assists?.total ?? 0;
+    nm += getNutTotal(r);
+
+    return {
+      date: r.date,
+      goals: g,
+      assists: a,
+      nutmegs: nm,
+    };
+  });
 }
 
 function groupByPlace(records) {
@@ -232,6 +332,67 @@ function groupByPlace(records) {
   return arr;
 }
 
+// ===== 年別集計（全期間） =====
+function buildYearSummary(allRecords) {
+  const map = new Map();
+
+  for (const r of allRecords) {
+    if (!r || !r.date) continue;
+
+    const year = String(r.date).slice(0, 4);
+    if (!/^\d{4}$/.test(year)) continue;
+
+    if (!map.has(year)) {
+      map.set(year, {
+        year,
+        playDays: 0, // ★ 登録件数として数える
+        matches: 0,
+        goals: 0,
+        assists: 0,
+        nutmegs: 0,
+      });
+    }
+
+    const row = map.get(year);
+    row.playDays += 1; // ★ 1レコード = 1
+    row.matches += getMatches(r);
+    row.goals += sumGoals(r);
+    row.assists += r.assists?.total ?? 0;
+    row.nutmegs += getNutTotal(r);
+  }
+
+  const arr = [...map.values()];
+  arr.sort((a, b) => b.year.localeCompare(a.year)); // 最新年→古い年
+  return arr;
+}
+
+function renderYearSummaryTable(allRecords) {
+  const tbody = document.getElementById("yearSummaryTbody");
+  if (!tbody) return;
+
+  const rows = buildYearSummary(allRecords);
+
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">データがありません。</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
+      <tr>
+        <td>${r.year}</td>
+        <td>${r.playDays}</td>
+        <td>${r.matches}</td>
+        <td>${r.goals}</td>
+        <td>${r.assists}</td>
+        <td>${r.nutmegs}</td>
+      </tr>
+    `,
+    )
+    .join("");
+}
+
 /* ====== Simple Canvas Charts (no libs) ====== */
 function setupCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
@@ -245,21 +406,41 @@ function setupCanvas(canvas) {
   return { ctx, w, h };
 }
 
+// ★横スクロール用
+function setupScrollableCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+
+  const parent = canvas.parentElement;
+  const parentRect = parent.getBoundingClientRect();
+
+  const viewW = Math.max(300, Math.floor(parentRect.width));
+  const cssH = 260;
+
+  // 横幅はここでは決めない（重要）
+  canvas.style.height = `${cssH}px`;
+  canvas.width = Math.floor(viewW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  return { ctx, w: viewW, h: cssH };
+}
+
 function clearChart(ctx, w, h) {
   ctx.clearRect(0, 0, w, h);
   // bg is CSS; do nothing
 }
 
-function drawAxes(ctx, w, h, { padding = 34 } = {}) {
-  // axes: left & bottom
+function drawAxes(ctx, w, h, { padding = 34, top = 10 } = {}) {
   ctx.save();
   ctx.globalAlpha = 0.7;
-  ctx.strokeStyle = "rgba(156,163,175,0.35)"; // muted-ish
+  ctx.strokeStyle = "rgba(156,163,175,0.35)";
   ctx.lineWidth = 1;
 
   // y axis
   ctx.beginPath();
-  ctx.moveTo(padding, 10);
+  ctx.moveTo(padding, top);
   ctx.lineTo(padding, h - padding);
   ctx.stroke();
 
@@ -270,13 +451,20 @@ function drawAxes(ctx, w, h, { padding = 34 } = {}) {
   ctx.stroke();
 
   ctx.restore();
-  return { padding };
+  return { padding, top };
 }
 
-function drawLineSeries(ctx, w, h, { xs, ys, color, padding = 34, maxY }) {
+function drawLineSeries(
+  ctx,
+  w,
+  h,
+  { xs, ys, color, padding = 34, top = 10, maxY },
+) {
   if (!xs.length) return;
+
   const usableW = w - padding - 10;
-  const usableH = h - padding - 10;
+  const usableH = h - padding - top;
+
   const minX = 0;
   const maxX = Math.max(1, xs.length - 1);
 
@@ -289,7 +477,7 @@ function drawLineSeries(ctx, w, h, { xs, ys, color, padding = 34, maxY }) {
     const xNorm = (i - minX) / (maxX - minX || 1);
     const yNorm = (ys[i] || 0) / (maxY || 1);
     const x = padding + xNorm * usableW;
-    const y = 10 + (1 - yNorm) * usableH;
+    const y = top + (1 - yNorm) * usableH;
 
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -302,11 +490,12 @@ function drawLineSeries(ctx, w, h, { xs, ys, color, padding = 34, maxY }) {
     const xNorm = (i - minX) / (maxX - minX || 1);
     const yNorm = (ys[i] || 0) / (maxY || 1);
     const x = padding + xNorm * usableW;
-    const y = 10 + (1 - yNorm) * usableH;
+    const y = top + (1 - yNorm) * usableH;
     ctx.beginPath();
     ctx.arc(x, y, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
+
   ctx.restore();
 }
 
@@ -385,9 +574,107 @@ function drawBarChart(
   ctx.restore();
 }
 
+function drawGroupedBarsNoInnerGap(
+  ctx,
+  w,
+  h,
+  labels,
+  series,
+  { padding = 34, showValues = true } = {},
+) {
+  clearChart(ctx, w, h);
+  // ★ 数値表示も考慮して上に余白を作る
+  const top = 22; // 数値(12px) + 余裕。好みで 18〜28 くらい
+  drawAxes(ctx, w, h, { padding, top });
+
+  // usableH も top を反映
+  const usableH = h - padding - top;
+
+  const nGroups = labels.length;
+  if (nGroups === 0) return;
+
+  const nSeries = series.length; // 3想定
+  // maxV に “ヘッドルーム” を持たせる（天井ギリギリを避ける）
+  const rawMaxV = Math.max(
+    1,
+    ...series.flatMap((s) => s.values.map((v) => Number(v) || 0)),
+  );
+
+  // ★ 余裕 15%（好みで 1.1〜1.3）
+  const maxV = rawMaxV * 1.15;
+
+  // ===== ★ 固定サイズ指定 =====
+  const barW = 14; // ← 棒1本の幅（固定）
+  const innerGap = 2; // ← 棒と棒の間
+  const groupGap = 10; // ← 日付グループ間の間隔
+
+  const groupW = nSeries * barW + (nSeries - 1) * innerGap;
+
+  ctx.save();
+  ctx.font =
+    "12px system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif";
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "center";
+
+  for (let i = 0; i < nGroups; i++) {
+    const baseX = padding + groupGap + i * (groupW + groupGap);
+
+    for (let s = 0; s < nSeries; s++) {
+      const v = Number(series[s].values[i] || 0);
+      const barH = (v / maxV) * usableH;
+
+      const x = baseX + s * (barW + innerGap);
+
+      const y = top + (usableH - barH);
+
+      // bar
+      ctx.fillStyle = series[s].color;
+      ctx.fillRect(x, y, barW, barH);
+
+      // value（中央上）
+      if (showValues && v > 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.fillText(String(v), x + barW / 2, Math.max(top + 12, y - 4));
+      }
+    }
+  }
+
+  ctx.restore();
+
+  // ===== Xラベルも中央固定 =====
+  drawXLabelsCentered(ctx, w, h, labels, {
+    padding,
+    groupW,
+    gap: groupGap,
+  });
+}
+
+function drawXLabelsCentered(ctx, w, h, labels, { padding, groupW, gap }) {
+  const y = h - padding + 18;
+
+  ctx.save();
+  ctx.fillStyle = "rgba(156,163,175,0.9)";
+  ctx.font =
+    "12px system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif";
+  ctx.textAlign = "center";
+
+  for (let i = 0; i < labels.length; i++) {
+    const baseX = padding + gap + i * (groupW + gap);
+    const center = baseX + groupW / 2;
+
+    ctx.fillText(labels[i], center, y);
+  }
+
+  ctx.restore();
+}
+
 /* ====== Rendering ====== */
 function renderCondition({ ym, place }, totalCount) {
-  const ymText = ym ? ym : "すべて";
+  let ymText = "すべて";
+  if (ym) {
+    if (/^\d{4}$/.test(ym)) ymText = `${ym}年`;
+    else ymText = ym;
+  }
   const placeText = place ? place : "すべて";
   conditionText.textContent = `表示条件：年月 ${ymText} / 場所 ${placeText}（対象 ${totalCount} 件）`;
 }
@@ -412,41 +699,94 @@ function renderKPIsToDom(kpis) {
   kpiNmOnly.textContent = String(kpis.nutmegs.details.only);
 }
 
-function renderTrendChart(rows) {
-  const { ctx, w, h } = setupCanvas(trendCanvas);
-  clearChart(ctx, w, h);
-  drawAxes(ctx, w, h, { padding: 34 });
+function formatAvg(x) {
+  const v = Number(x);
+  if (!Number.isFinite(v)) return "0";
 
-  const labels = rows.map((r) => String(r.date).slice(5)); // "MM-DD" くらい
+  const rounded = Math.round(v * 10) / 10; // 小数1桁に丸め
+  return rounded % 1 === 0 ? String(rounded) : rounded.toFixed(1);
+}
+
+function renderAverageTable(records) {
+  if (!avgTableBody) return;
+
+  // 指定期間の合計試合数（matches合計）
+  const matchesTotal = records.reduce((sum, r) => sum + getMatches(r), 0);
+
+  // 指定期間の合計値
+  const goalsTotal = records.reduce((sum, r) => sum + sumGoals(r), 0);
+  const assistsTotal = records.reduce(
+    (sum, r) => sum + (r.assists?.total ?? 0),
+    0,
+  );
+  const nutTotal = records.reduce((sum, r) => sum + getNutTotal(r), 0);
+
+  const denom = Math.max(1, matchesTotal); // 0除算回避（試合数0なら1扱い）
+
+  const rows = [
+    { label: "ゴール", total: goalsTotal, avg: goalsTotal / denom },
+    { label: "アシスト", total: assistsTotal, avg: assistsTotal / denom },
+    { label: "股抜き", total: nutTotal, avg: nutTotal / denom },
+  ];
+
+  avgTableBody.innerHTML = rows
+    .map(
+      (x) => `
+      <tr>
+        <td>${escapeHtml(x.label)}</td>
+        <td>${x.total}</td>
+        <td>${matchesTotal}</td>
+        <td>${formatAvg(x.avg)}</td>
+      </tr>
+    `,
+    )
+    .join("");
+}
+
+function renderTrendChart(rows) {
+  const labels = buildTrendLabels(rows);
+
+  const nGroups = labels.length;
+  const nSeries = 3;
+
+  const barW = 14;
+  const innerGap = 2;
+  const groupGap = 10;
+  const padding = 34;
+
+  const groupW = nSeries * barW + (nSeries - 1) * innerGap;
+
+  // ★ 横幅を正しく計算（これが抜けていた）
+  const totalW = padding + groupGap + nGroups * (groupW + groupGap);
+
+  const cssH = 260;
+  const dpr = window.devicePixelRatio || 1;
+
+  // ★ ここが最重要
+  trendCanvas.style.width = `${totalW}px`;
+  trendCanvas.style.height = `${cssH}px`;
+  trendCanvas.width = Math.floor(totalW * dpr);
+  trendCanvas.height = Math.floor(cssH * dpr);
+
+  const ctx = trendCanvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
   const goals = rows.map((r) => r.goals);
   const assists = rows.map((r) => r.assists);
   const nutmegs = rows.map((r) => r.nutmegs);
 
-  const maxY = Math.max(1, ...goals, ...assists, ...nutmegs);
-
-  // lines (colors are chosen to match legend)
-  drawLineSeries(ctx, w, h, {
-    xs: labels,
-    ys: goals,
-    color: "#22c55e",
-    maxY,
-  });
-  drawLineSeries(ctx, w, h, {
-    xs: labels,
-    ys: assists,
-    color: "#60a5fa",
-    maxY,
-  });
-  drawLineSeries(ctx, w, h, {
-    xs: labels,
-    ys: nutmegs,
-    color: "#f59e0b",
-    maxY,
-  });
-
-  // x labels (sparse)
-  const step = rows.length <= 10 ? 1 : rows.length <= 20 ? 2 : 4;
-  drawXLabels(ctx, w, h, labels, { step });
+  drawGroupedBarsNoInnerGap(
+    ctx,
+    totalW,
+    cssH,
+    labels,
+    [
+      { name: "Goals", values: goals, color: "rgba(34,197,94,0.85)" },
+      { name: "Assists", values: assists, color: "rgba(96,165,250,0.85)" },
+      { name: "Nutmegs", values: nutmegs, color: "rgba(245,158,11,0.85)" },
+    ],
+    { padding, showValues: true },
+  );
 }
 
 function renderGoalBreak(kpis) {
@@ -558,6 +898,99 @@ function renderRecordsTable(records) {
     tr.innerHTML = `<td colspan="6" class="muted">※表示は先頭200件まで（全${sorted.length}件）</td>`;
     recordsTbody.appendChild(tr);
   }
+
+  // 件数表示（HTMLに #recordsCountText がある前提）
+  const countEl = document.getElementById("recordsCountText");
+  if (countEl) countEl.textContent = `（${records.length}件）`;
+}
+
+function isValidHttpUrl(s) {
+  const v = String(s || "").trim();
+  return /^https?:\/\//i.test(v);
+}
+
+// filteredRecords（指定期間）から playVideos を取り出して平坦化
+function collectUrlsFromRecords(filteredRecords) {
+  const rows = [];
+
+  for (const r of filteredRecords) {
+    const arr = Array.isArray(r?.playVideos) ? r.playVideos : [];
+    for (const v of arr) {
+      const tag = (v?.tag || "その他").trim() || "その他";
+      const url = (v?.url || "").trim();
+      if (!isValidHttpUrl(url)) continue;
+
+      rows.push({
+        tag,
+        url,
+        date: r?.date || "",
+        createdAt: r?.createdAt || "",
+      });
+    }
+  }
+
+  // 表示を安定化：新しい記録のURLを上へ（date+createdAt desc）
+  rows.sort((a, b) =>
+    (b.date + b.createdAt).localeCompare(a.date + a.createdAt),
+  );
+
+  return rows;
+}
+
+function uniq(arr) {
+  return [...new Set(arr)];
+}
+
+function renderUrlTable(rows, selectedTag = "") {
+  if (!urlTableBody || !urlTagFilter) return;
+
+  const filtered =
+    selectedTag && selectedTag !== "all"
+      ? rows.filter((x) => x.tag === selectedTag)
+      : rows;
+
+  if (urlCountText) {
+    urlCountText.textContent = `表示 ${filtered.length} 件 / 全 ${rows.length} 件`;
+  }
+
+  if (filtered.length === 0) {
+    urlTableBody.innerHTML = `<tr><td colspan="2" class="muted">URLがありません。</td></tr>`;
+    return;
+  }
+
+  urlTableBody.innerHTML = filtered
+    .map(
+      (x) => `
+      <tr>
+        <td><span class="tagBadge">${escapeHtml(x.tag)}</span></td>
+        <td class="urlCell">
+          <a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer">
+            ${escapeHtml(x.url)}
+          </a>
+        </td>
+      </tr>
+    `,
+    )
+    .join("");
+}
+
+function buildUrlTagFilterOptions(rows, prefer = "all") {
+  if (!urlTagFilter) return;
+
+  const tags = uniq(rows.map((x) => x.tag)).sort((a, b) =>
+    a.localeCompare(b, "ja"),
+  );
+
+  // "all" = すべて
+  urlTagFilter.innerHTML =
+    `<option value="all">すべて</option>` +
+    tags
+      .map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)
+      .join("");
+
+  // 選択復元
+  const exists = [...urlTagFilter.options].some((o) => o.value === prefer);
+  urlTagFilter.value = exists ? prefer : "all";
 }
 
 /* ====== Main ====== */
@@ -577,23 +1010,50 @@ function render() {
   const kpis = calcKPIs(filtered);
   renderKPIsToDom(kpis);
 
-  const byDate = groupByDate(filtered);
-  renderTrendChart(byDate);
+  // ★Averageテーブル（指定期間）
+  renderAverageTable(filtered);
+
+  const trendRows = buildCumulativeRowsPerRecord(filtered);
+  renderTrendChart(trendRows);
 
   renderGoalBreak(kpis);
   renderNutBreak(kpis);
 
   renderPlaceTable(filtered);
   renderRecordsTable(filtered);
+  renderYearSummaryTable(all);
+
+  // ===== URL一覧（指定期間）=====
+  const urlRows = collectUrlsFromRecords(filtered);
+
+  buildUrlTagFilterOptions(urlRows, urlTagFilter?.value || "all");
+  renderUrlTable(urlRows, urlTagFilter?.value || "all");
+
+  if (urlTagFilter && !urlTagFilter.__bound) {
+    urlTagFilter.__bound = true;
+    urlTagFilter.addEventListener("change", () => {
+      // フィルタ選択は保持されるので再描画でOK
+      render();
+    });
+  }
 }
 
 function init() {
   reloadBtn?.addEventListener("click", () => location.reload());
   backBtn?.addEventListener("click", () => {
-    // returnTo=mypage が来ていればマイページへ、それ以外は index へ
     const sp = new URLSearchParams(location.search);
-    const returnTo = (sp.get("returnTo") || "").trim();
 
+    // ★back があれば最優先でそこへ戻る（フィルタ維持）
+    const back = (sp.get("back") || "").trim();
+    if (back) {
+      // URLSearchParams は自動でデコードしてくれることもありますが、
+      // エンコード済みで来る環境があるので安全側で decode する
+      location.href = decodeURIComponent(back);
+      return;
+    }
+
+    // 既存ロジック（保険）
+    const returnTo = (sp.get("returnTo") || "").trim();
     if (returnTo === "mypage") location.href = "./index.html#tab=mypage";
     else if (returnTo === "settings")
       location.href = "./index.html#tab=settings";

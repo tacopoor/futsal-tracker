@@ -152,6 +152,24 @@
         border: 1px solid var(--line);
         border-radius: 16px;
       }
+      /* ===== 横スクロール（トレンドだけ） ===== */
+      .chartScroll {
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      /* 重要：全canvas共通の width:100% を、トレンドだけ解除する */
+      #trendChart.scrollCanvas {
+        width: auto; /* ←これがないとJSで横に伸ばせない */
+        min-width: 100%; /* 少ないデータのときは領域いっぱい */
+      }
+
+      /* （任意）スクロール時に角丸が欠けるのが気になる場合 */
+      .chartScroll {
+        border-radius: 16px;
+      }
+
       .chartWrap {
         padding: 10px;
         background: #0f172a;
@@ -244,6 +262,61 @@
         word-break: break-word; /* 日本語/英数混在でも崩れにくく */
         line-height: 1.35;
       }
+      /* ===== アコーディオン（details/summary） ===== */
+      .accSummary {
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        background: #0f172a;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+      .accSummary::-webkit-details-marker {
+        display: none;
+      }
+      .acc[open] .accSummary {
+        border-bottom-left-radius: 10px;
+        border-bottom-right-radius: 10px;
+      }
+      .accBody {
+        padding-top: 10px;
+      }
+      /* ===== URL list ===== */
+      .filterRow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+      .select {
+        background: #0f172a;
+        color: var(--txt);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 13px;
+      }
+      .urlCell a {
+        color: #93c5fd;
+        text-decoration: underline;
+        word-break: break-all;
+      }
+      .tagBadge {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.18);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+        color: #bbf7d0;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
@@ -321,11 +394,32 @@
             <span><i class="dot" style="background: #f59e0b"></i>股抜き</span>
           </div>
         </div>
-        <div class="chartWrap">
-          <canvas id="trendChart"></canvas>
+        <div class="chartWrap chartScroll">
+          <canvas id="trendChart" class="scrollCanvas"></canvas>
         </div>
         <div class="muted small" style="margin-top: 8px">
-          ※同一日付に複数記録がある場合は合算しています。
+          ※保存した「記録」ごとの累計を表示します（同じ日付でも記録が複数あれば棒が複数出ます）。
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="h2">ゴール・アシスト・股抜き数 Average</h2>
+        <div class="muted small" style="margin-bottom: 8px">
+          ※Average = 指定期間の合計 ÷ 指定期間の試合数（matches合計）
+        </div>
+
+        <div style="overflow: auto">
+          <table>
+            <thead>
+              <tr>
+                <th>指標</th>
+                <th>合計</th>
+                <th>試合数</th>
+                <th>Average</th>
+              </tr>
+            </thead>
+            <tbody id="avgTableBody"></tbody>
+          </table>
         </div>
       </section>
 
@@ -373,21 +467,78 @@
       </section>
 
       <section class="card">
-        <h2 class="h2">対象レコード一覧</h2>
+        <details id="recordsAccordion">
+          <summary class="h2">
+            対象レコード一覧
+            <span id="recordsCountText" class="muted small"></span>
+          </summary>
+
+          <div style="overflow: auto; margin-top: 10px">
+            <table>
+              <thead>
+                <tr>
+                  <th>日付・場所</th>
+                  <th>試合数</th>
+                  <th>ゴール</th>
+                  <th>アシスト</th>
+                  <th>股抜き</th>
+                  <th>メモ</th>
+                </tr>
+              </thead>
+              <tbody id="recordsTbody"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2 class="h2">年別集計（全期間）</h2>
+        <div class="muted small" style="margin-bottom: 8px">
+          ※表示条件（年月/場所）に関係なく、保存データ全体から年ごとに集計します。
+        </div>
+
         <div style="overflow: auto">
           <table>
             <thead>
               <tr>
-                <th>日付・場所</th>
+                <th>年</th>
+                <th>Play日数</th>
                 <th>試合数</th>
                 <th>ゴール</th>
                 <th>アシスト</th>
                 <th>股抜き</th>
-                <th>メモ</th>
               </tr>
             </thead>
-            <tbody id="recordsTbody"></tbody>
+            <tbody id="yearSummaryTbody"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="chartTitleRow">
+          <h2 class="h2" style="margin: 0">URL一覧（指定期間）</h2>
+          <div class="muted small" id="urlCountText"></div>
+        </div>
+
+        <div class="filterRow">
+          <div class="muted small">タグで絞り込み：</div>
+          <select id="urlTagFilter" class="select"></select>
+        </div>
+
+        <div style="overflow: auto">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 12ch">タグ</th>
+                <th>URL</th>
+              </tr>
+            </thead>
+            <tbody id="urlTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="muted small" style="margin-top: 8px">
+          ※リンクは別タブで開きます。
         </div>
       </section>
     </main>
