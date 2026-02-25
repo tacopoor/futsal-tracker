@@ -1,6 +1,10 @@
 /* ====== Storage ====== */
 const STORAGE_KEY = "futsal_records_v1";
 const SETTINGS_KEY = "futsal_settings_v2";
+const FILTER_STATE_KEY = "futsal_filter_state_v1";
+
+/* ★最後に使った日付を保持 */
+const LAST_DATE_KEY = "futsal_last_date_v1";
 
 /* ====== Default master data ====== */
 const DEFAULT_PLACES = [
@@ -18,6 +22,14 @@ const DEFAULT_PLACES = [
   "大会",
   "その他",
 ];
+/* ★表示名だけ差し替え（value=旧名のまま） */
+const PLACE_LABEL_OVERRIDES = {
+  マリノストリコールパーク: "マリノストリコロールパーク新吉田",
+};
+
+function placeLabelOf(value) {
+  return PLACE_LABEL_OVERRIDES[value] || value;
+}
 
 /* ====== Play video tags ====== */
 const VIDEO_TAGS = [
@@ -83,7 +95,35 @@ function loadSettings() {
 function saveSettings(settings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
+function loadFilterState() {
+  try {
+    const raw = localStorage.getItem(FILTER_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
 
+function saveFilterState(state) {
+  try {
+    localStorage.setItem(FILTER_STATE_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+// ★マイページのフィルタ select が用意できた後に呼ぶ
+function restoreMypageFilters(filterYMEl, filterPlaceEl) {
+  const st = loadFilterState();
+  if (!st) return;
+
+  // option生成後にセットするのが重要
+  if (filterYMEl && typeof st.ym === "string") {
+    // "all" の保存はしない設計なので "" = すべて
+    filterYMEl.value = st.ym || "";
+  }
+  if (filterPlaceEl && typeof st.place === "string") {
+    filterPlaceEl.value = st.place || "";
+  }
+}
 /* ====== Utilities ====== */
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -173,7 +213,8 @@ function renderPlaceSelect(
   }
 
   for (const p of places) {
-    html += `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`;
+    const label = placeLabelOf(p); // ★表示だけ差し替え
+    html += `<option value="${escapeHtml(p)}">${escapeHtml(label)}</option>`;
   }
   selectEl.innerHTML = html;
 
@@ -227,6 +268,10 @@ const settingsMsgEl = document.getElementById("settingsMsg");
 
 /* ====== Elements: Record ====== */
 const elDate = document.getElementById("date");
+/* ★日付選択時点で保持（即時セット扱い） */
+elDate?.addEventListener("input", () => setLastDate(elDate.value));
+elDate?.addEventListener("change", () => setLastDate(elDate.value));
+
 const elPlace = document.getElementById("place");
 const elMatches = document.getElementById("matches");
 
@@ -515,6 +560,29 @@ tabMypage.addEventListener("click", () => showTab("mypage"));
 tabSettings.addEventListener("click", () => showTab("settings"));
 
 /* ====== Defaults ====== */
+function getLastDate() {
+  const v = (localStorage.getItem(LAST_DATE_KEY) || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
+}
+function setLastDate(iso) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(iso))) {
+    localStorage.setItem(LAST_DATE_KEY, iso);
+  }
+}
+function setDefaultDateToday() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  elDate.value = `${yyyy}-${mm}-${dd}`;
+}
+
+/* ★優先：最後に使った日付 → なければ今日 */
+function setDefaultDatePreferLast() {
+  const last = getLastDate();
+  if (last) elDate.value = last;
+  else setDefaultDateToday();
+}
 function setDefaultDateToday() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -523,7 +591,7 @@ function setDefaultDateToday() {
   elDate.value = `${yyyy}-${mm}-${dd}`;
 }
 function resetForm() {
-  setDefaultDateToday();
+  setDefaultDatePreferLast(); // ★最後に記録した日付を維持
   elPlace.value = "";
   elMemo.value = "";
   msgClear(recordMsgEl);
@@ -560,17 +628,8 @@ addVideoBtn?.addEventListener("click", () => {
   const count = videoInputs.querySelectorAll(".videoRow").length;
   if (count >= VIDEO_MAX_ROWS) return;
 
-  addVideoBtn?.addEventListener("click", () => {
-    if (!videoInputs) return;
-
-    const count = videoInputs.querySelectorAll(".videoRow").length;
-    if (count >= VIDEO_MAX_ROWS) return;
-
-    // ★追加する行は必ず4行目以降扱いになるので count をrowIndexとして渡す
-    videoInputs.appendChild(createVideoRow({ url: "", tag: "その他" }, count));
-
-    updateAddVideoBtnState();
-  });
+  // ★追加する行は必ず4行目以降扱いになるので count をrowIndexとして渡す
+  videoInputs.appendChild(createVideoRow({ url: "", tag: "その他" }, count));
 
   updateAddVideoBtnState();
 });
@@ -653,7 +712,7 @@ function loadRecordToForm(record) {
 
   msgInfo(
     recordMsgEl,
-    `修正モード：${formatDate(record.date)} / ${record.place}`,
+    `修正モード：${formatDate(record.date)} / ${placeLabelOf(record.place)}`,
   );
 }
 
@@ -753,9 +812,11 @@ saveBtn.addEventListener("click", () => {
     }
     saveRecords(records);
 
+    setLastDate(date);
+
     msgInfo(
       recordMsgEl,
-      `更新しました：${formatDate(record.date)} / ${record.place}` +
+      `更新しました：${formatDate(record.date)} / ${placeLabelOf(record.place)}` +
         `（試合数 ${record.matches}、ゴール ${sumGoals(record)}、アシスト ${record.assists.total} / ${record.assists.targetName} ${record.assists.toTarget}、股抜き ${record.nutmegs.total}）`,
     );
 
@@ -765,6 +826,8 @@ saveBtn.addEventListener("click", () => {
     // 新規
     records.push(record);
     saveRecords(records);
+
+    setLastDate(date);
 
     msgInfo(
       recordMsgEl,
@@ -783,7 +846,9 @@ saveBtn.addEventListener("click", () => {
   }
 
   resetForm();
-  openDoneModal();
+  openDoneModal("記録完了", "保存しました。", () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
 });
 
 recordDeleteBtn?.addEventListener("click", () => {
@@ -899,8 +964,21 @@ function applyFilters(records) {
   });
 }
 
-filterYM?.addEventListener("change", renderMypage);
-filterPlace.addEventListener("change", renderMypage);
+filterYM?.addEventListener("change", () => {
+  saveFilterState({
+    ym: filterYM?.value || "all",
+    place: filterPlace?.value || "",
+  });
+  renderMypage();
+});
+
+filterPlace.addEventListener("change", () => {
+  saveFilterState({
+    ym: filterYM?.value || "all",
+    place: filterPlace?.value || "",
+  });
+  renderMypage();
+});
 
 /* ====== KPI ====== */
 function renderKPIs(records) {
@@ -1029,7 +1107,7 @@ function renderRecordsItems(recordsInGroup) {
           <div class="itemRow">
             <div class="itemMain">
               <div class="itemDate">${formatDate(r.date)}</div>
-              <div class="itemPlace">${escapeHtml(r.place)}</div>
+              <div class="itemPlace">${escapeHtml(placeLabelOf(r.place))}</div>
 
               <div class="muted small itemMeta">
                 試合数：${matches} /
@@ -1155,6 +1233,9 @@ function renderMypage() {
   if (filterYM && filterYM.options.length === 0) {
     buildYMOptions(all);
   }
+
+  // ★復元（option生成後が重要）
+  restoreMypageFilters(filterYM, filterPlace);
 
   const filtered = applyFilters(all);
   renderKPIs(filtered);
@@ -1367,7 +1448,7 @@ function renderSettings() {
       const canDelete = !isDefault && p !== "その他";
       return `
       <div class="placeRow">
-        <div class="name">${escapeHtml(p)}</div>
+        <div class="name">${escapeHtml(placeLabelOf(p))}</div>
         ${
           canDelete
             ? `<button class="btn danger" data-action="delPlace" data-name="${escapeHtml(
@@ -1554,6 +1635,9 @@ window.addEventListener("hashchange", applyHashTab);
 function openAnalysisPage() {
   const ym = (filterYM?.value || "").trim(); // "all" / "YYYY" / "YYYY-MM"
   const place = (filterPlace?.value || "").trim(); // "" = すべて
+
+  // ★ここを追加
+  saveFilterState({ ym, place });
 
   const params = new URLSearchParams();
   if (ym) params.set("ym", ym);
